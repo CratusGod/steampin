@@ -1,0 +1,7 @@
+/target
+/vendor/dl
+/vendor/zapret/*.exe
+/vendor/zapret/*.dll
+/vendor/zapret/*.sys
+/vendor/zapret/*.bin
+/test-results

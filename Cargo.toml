@@ -1,0 +1,39 @@
+[package]
+name = "steampin"
+version = "3.0.0"
+edition = "2021"
+description = "Keeps Steam working where it's blocked: pins Steam to working servers and runs a Steam-only DPI bypass when needed."
+license = "MIT"
+repository = "https://github.com/CratusGod/steampin"
+build = "build.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+sha2 = "0.10"
+regex-lite = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+windows-service = "0.7"
+winreg = "0.52"
+slint = { version = "1.8", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "accessibility"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem",
+    "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading", "Win32_System_JobObjects",
+    "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_DataExchange",
+    "Win32_System_Memory", "Win32_System_Ole", "Win32_Globalization", "Win32_System_Registry",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

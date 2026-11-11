@@ -1,0 +1,59 @@
+{
+  "targets": [
+    { "name": "store.steampowered.com", "group": "Store", "path": "/robots.txt", "expectStatus": [200], "expectBody": "(?i)user-agent" },
+    { "name": "api.steampowered.com", "group": "Sign-in", "path": "/ISteamWebAPIUtil/GetServerInfo/v1/", "expectStatus": [200], "expectBody": "\"servertime\"" },
+    { "name": "login.steampowered.com", "group": "Sign-in", "path": "/", "expectStatus": [301, 302, 303, 307, 308], "expectRedirect": "^https://([a-z0-9-]+\\.)*steampowered\\.com/" },
+    { "name": "steamcommunity.com", "group": "Community", "path": "/robots.txt", "expectStatus": [200], "expectBody": "(?i)user-agent" },
+    { "name": "help.steampowered.com", "group": "Help & checkout", "path": "/", "expectStatus": [301, 302, 303, 307, 308], "expectRedirect": "^https://([a-z0-9-]+\\.)*steampowered\\.com/" },
+    { "name": "checkout.steampowered.com", "group": "Help & checkout", "path": "/", "expectStatus": [301, 302, 303, 307, 308], "expectRedirect": "^https://([a-z0-9-]+\\.)*steampowered\\.com/" },
+    { "name": "steam-chat.com", "group": "Community", "path": "/", "expectStatus": [200, 301, 302, 404] },
+    { "name": "store.akamai.steamstatic.com", "group": "Images", "path": "/public/shared/images/header/logo_steam.svg", "expectStatus": [200] },
+    { "name": "shared.akamai.steamstatic.com", "group": "Images", "path": "/store_item_assets/steam/apps/730/header.jpg", "expectStatus": [200] },
+    { "name": "cdn.akamai.steamstatic.com", "group": "Images", "path": "/steam/apps/730/header.jpg", "expectStatus": [200] },
+    { "name": "community.akamai.steamstatic.com", "group": "Images", "path": "/public/shared/images/responsive/header_logo.png", "expectStatus": [200] },
+    { "name": "community.fastly.steamstatic.com", "group": "Images", "path": "/public/shared/images/responsive/header_logo.png", "expectStatus": [200] },
+    { "name": "avatars.akamai.steamstatic.com", "group": "Images", "path": "/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg", "expectStatus": [200] },
+    { "name": "images.steamusercontent.com", "group": "Images", "path": "/ugc/", "expectStatus": [200, 403, 404] }
+  ],
+
+  "seeds": [
+    "42.119.186.138", "42.119.184.231", "118.68.82.144",
+    "118.69.17.16", "118.69.17.187", "118.69.17.196", "118.69.17.204",
+    "183.80.211.200", "183.80.211.209", "183.80.211.210"
+  ],
+
+  "resolvers": [
+    "8.8.8.8", "8.8.4.4", "208.67.222.222", "208.67.220.220", "9.9.9.9", "1.1.1.1",
+    "a1-194.akam.net", "a2-64.akam.net", "a7-66.akam.net",
+    "a9-66.akam.net", "a22-67.akam.net", "a24-64.akam.net"
+  ],
+  "dohUrls": ["https://dns.google/resolve"],
+  "allowedNetworks": [],
+
+  "bypassDomains": [
+    "steampowered.com", "steamcommunity.com", "steamstatic.com", "steam-chat.com",
+    "steamgames.com", "steamusercontent.com", "s.team", "valvesoftware.com",
+    "steamuserimages-a.akamaihd.net", "steamcommunity-a.akamaihd.net", "steamstore-a.akamaihd.net",
+    "steamcdn-a.akamaihd.net"
+  ],
+  "bypassExclude": [
+    "steamcontent.com", "steamserver.net", "steampipe.akamaized.net",
+    "client-update.steamstatic.com", "clientconfig.akamai.steamstatic.com"
+  ],
+
+  "samples": 3,
+  "probeTimeoutSec": 6,
+  "connectTimeoutSec": 3,
+  "maxCandidatesPerName": 16,
+  "maxParallelProbes": 12,
+  "switchMinGainPct": 20,
+  "switchMinGainMs": 15,
+  "switchConfirmRuns": 2,
+  "removeAfterFailedRuns": 2,
+  "forgetAfterDays": 14,
+  "runBudgetSec": 300,
+  "checkIntervalMin": 30,
+  "fullCheckIntervalHours": 24,
+  "connectivityUrl": "http://www.msftconnecttest.com/connecttest.txt",
+  "connectivityExpect": "Microsoft Connect Test"
+}
