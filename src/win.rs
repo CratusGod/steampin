@@ -93,8 +93,8 @@ pub fn start_as_desktop_user(exe: &Path, args: &str) -> bool {
     unsafe {
         let mut my_session = 0u32;
         ProcessIdToSessionId(GetCurrentProcessId(), &mut my_session);
-        // Run by the service (session 0, e.g. the updater): use the signed-in user's console session.
-        if my_session == 0 { my_session = windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId(); }
+        // Run by the service (session 0, e.g. the updater): Explorer's token can't be used from there.
+        if my_session == 0 { return start_in_console_session(exe, args); }
         let Some(shell) = processes().into_iter().find(|p| {
             let mut s = u32::MAX;
             p.name.eq_ignore_ascii_case("explorer.exe") && ProcessIdToSessionId(p.pid, &mut s) != 0 && s == my_session
@@ -222,3 +222,35 @@ pub fn attach_console() {
     }
 }
 const INVALID_HANDLE_VALUE_: windows_sys::Win32::Foundation::HANDLE = -1isize as _;
+
+/// From a service (session 0): starts `exe args` on the signed-in user's desktop with their own
+/// (non-elevated) token, the documented way: WTSQueryUserToken + CreateProcessAsUserW.
+fn start_in_console_session(exe: &Path, args: &str) -> bool {
+    use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX { return false; } // nobody signed in at the console
+        let mut tok: HANDLE = std::ptr::null_mut();
+        if WTSQueryUserToken(session, &mut tok) == 0 { return false; }
+        let mut env: *mut std::ffi::c_void = std::ptr::null_mut();
+        let have_env = CreateEnvironmentBlock(&mut env, tok, 0) != 0;
+        let mut cmd = wide(format!("\"{}\" {}", exe.display(), args));
+        let dir = exe.parent().map(wide);
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut desktop = wide(r"winsta0\default");
+        si.lpDesktop = desktop.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+        let ok = windows_sys::Win32::System::Threading::CreateProcessAsUserW(tok, std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0,
+            CREATE_NO_WINDOW | if have_env { CREATE_UNICODE_ENVIRONMENT } else { 0 }, if have_env { env } else { std::ptr::null() },
+            dir.as_ref().map(|d| d.as_ptr()).unwrap_or(std::ptr::null()), &si, &mut pi);
+        if have_env { DestroyEnvironmentBlock(env); }
+        CloseHandle(tok);
+        if ok == 0 { return false; }
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        true
+    }
+}

@@ -37,10 +37,15 @@ pub fn run(args: &[String]) -> i32 {
     let has = |f: &str| args.iter().any(|a| a == f);
     match args[0].as_str() {
         "--install" => {
-            let c = crate::installer::install(&say);
+            // Run by the updater nobody sees the output: put it in the log instead.
+            let log = crate::paths::Log::new(Some(paths.log()), false);
+            let to_log = |m: &str| log.info(&format!("update: {m}"));
+            let c = crate::installer::install(if has("--after-update") { &to_log } else { &say });
             // Started by the service's updater: the installer closed the window, so open it again
             // (on the Update tab) to show the new version.
-            if c == 0 && has("--after-update") { crate::win::start_as_desktop_user(&paths.exe(), "--window --page 6"); }
+            if c == 0 && has("--after-update") && !crate::win::start_as_desktop_user(&paths.exe(), "--window --page 6") {
+                to_log("couldn't open the window again (nobody signed in?)");
+            }
             c
         }
         "--uninstall" => {
