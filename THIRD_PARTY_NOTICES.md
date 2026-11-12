@@ -1,6 +1,6 @@
-# Third-party software in SteamPin
+# Third-party software in RustyDPI
 
-SteamPin.exe embeds these files and installs them to `C:\Program Files\SteamPin\zapret`.
+RustyDPI.exe embeds these files and installs them to `C:\Program Files\RustyDPI\zapret`.
 They are copied unchanged from the official release and checked against SHA-256 hashes
 at build time (`tools/fetch-zapret.ps1`) and at run time (`src/bypass.rs`).
 

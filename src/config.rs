@@ -1,5 +1,5 @@
 //! Configuration: built-in defaults (assets/default-config.json), optionally overridden by
-//! C:\ProgramData\SteamPin\config.json. Everything is validated before use.
+//! C:\ProgramData\RustyDPI\config.json. Everything is validated before use.
 
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
@@ -15,12 +15,42 @@ pub struct Target {
     pub expect_body: Option<String>,
     pub expect_redirect: Option<String>,
     pub seeds: Vec<String>,
+    /// Probe with a browser-sized (post-quantum) ClientHello, as Chrome, Edge and Firefox send today.
+    #[serde(skip)]
+    pub big_hello: bool,
+    /// Added by the user (Sites tab), not one of Steam's hosts.
+    #[serde(skip)]
+    pub user: bool,
 }
 
 impl Default for Target {
     fn default() -> Self {
-        Target { name: String::new(), group: "Other".into(), path: "/".into(), expect_status: vec![200], expect_body: None, expect_redirect: None, seeds: vec![] }
+        Target { name: String::new(), group: "Other".into(), path: "/".into(), expect_status: vec![200], expect_body: None, expect_redirect: None, seeds: vec![], big_hello: false, user: false }
     }
+}
+
+/// Group name for the sites the user added.
+pub const USER_GROUP: &str = "Other sites";
+pub const MAX_SITES: usize = 30;
+
+/// How a user-added site appears in logs, reports and (until "Show names" is on) the window:
+/// first letter and top-level domain only, with a fixed-length middle so the length doesn't leak.
+/// "discord.com" -> "d****.com"
+pub fn mask_site(name: &str) -> String {
+    let first = name.chars().next().unwrap_or('?');
+    let tld = name.rsplit('.').next().unwrap_or("");
+    format!("{first}****.{tld}")
+}
+
+/// Turns what a user typed ("https://www.Example.com/page", "example.com:443") into a host name, or None.
+pub fn clean_site(s: &str) -> Option<String> {
+    let mut h = s.trim().to_ascii_lowercase();
+    if let Some(i) = h.find("://") { h = h[i + 3..].to_string(); }
+    if let Some(i) = h.find(|c| c == '/' || c == '?' || c == '#') { h.truncate(i); }
+    if let Some(i) = h.rfind('@') { h = h[i + 1..].to_string(); }
+    if let Some(i) = h.find(':') { h.truncate(i); }
+    let h = h.trim_start_matches("*.").trim_end_matches('.').to_string();
+    is_host_name(&h).then_some(h)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,6 +118,20 @@ impl Config {
         let mut c: Config = serde_json::from_str(json).map_err(|e| format!("config.json: {e}"))?;
         c.validate()?;
         Ok(c)
+    }
+
+    /// Adds the user's own sites as targets: any HTTP answer over HTTPS with a valid certificate counts
+    /// as working (a blocked site gets a reset, a timeout or a block page with the wrong certificate).
+    pub fn add_sites(&mut self, sites: &[String]) {
+        for s in sites.iter().filter_map(|s| clean_site(s)).take(MAX_SITES) {
+            if self.targets.iter().any(|t| t.name == s) { continue; }
+            self.targets.push(Target { name: s, group: USER_GROUP.into(), expect_status: (100..=599).collect(), user: true, big_hello: true, ..Default::default() });
+        }
+    }
+
+    /// A host name as it may be written to the log: user-added sites are masked.
+    pub fn shown(&self, name: &str) -> String {
+        if self.targets.iter().any(|t| t.user && t.name == name) { mask_site(name) } else { name.to_string() }
     }
 
     #[allow(dead_code)]
@@ -167,6 +211,26 @@ mod tests {
             r#"{ "targets": "#,
         ];
         for c in cases { assert!(Config::parse(c).is_err(), "{c}"); }
+    }
+
+    #[test]
+    fn cleans_user_sites() {
+        assert_eq!(clean_site(" https://www.Example.com/a/b?c=1 ").as_deref(), Some("www.example.com"));
+        assert_eq!(clean_site("discord.com:443").as_deref(), Some("discord.com"));
+        assert_eq!(clean_site("*.medium.com").as_deref(), Some("medium.com"));
+        for bad in ["", "localhost", "not a site", "a..com", "1.2.3", "exa mple.com", "-x.com", "x.com\n127.0.0.1 evil.com"] {
+            assert_eq!(clean_site(bad), None, "{bad:?}");
+        }
+        let mut c = Config::default_config();
+        c.add_sites(&["Example.com".into(), "example.com".into(), "store.steampowered.com".into(), "bad name".into()]);
+        assert_eq!(c.targets.len(), 15);
+        let t = c.target("example.com").unwrap();
+        assert!(t.user && t.group == USER_GROUP && t.expect_status.contains(&403));
+        assert!(!c.target("store.steampowered.com").unwrap().user);
+        assert_eq!(mask_site("discord.com"), "d****.com");
+        assert_eq!(mask_site("www.example.co.uk"), "w****.uk");
+        assert_eq!(c.shown("example.com"), "e****.com");
+        assert_eq!(c.shown("store.steampowered.com"), "store.steampowered.com");
     }
 
     #[test]

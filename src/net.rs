@@ -16,6 +16,8 @@ pub trait Net: Sync {
     fn public_resolve(&self, name: &str) -> Vec<String>;
     fn flush_dns(&self);
     fn detect_network(&self) -> NetworkId;
+    /// Global IPv6 addresses Windows' DNS gives for `name` (browsers prefer these when the PC has IPv6).
+    fn system_resolve_v6(&self, _name: &str) -> Vec<String> { vec![] }
 }
 
 pub struct RealNet<'a> { pub cfg: &'a Config, pub flush: bool }
@@ -56,6 +58,14 @@ impl Net for RealNet<'_> {
     }
 
     fn detect_network(&self) -> NetworkId { detect_network() }
+
+    fn system_resolve_v6(&self, name: &str) -> Vec<String> {
+        for srv in system_dns_servers().iter().take(2) {
+            let a = dns::query_aaaa(srv, name, Duration::from_secs(2));
+            if !a.is_empty() { return dedup(a); }
+        }
+        vec![]
+    }
 }
 
 fn dedup(v: Vec<String>) -> Vec<String> {

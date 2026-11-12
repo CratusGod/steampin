@@ -1,16 +1,18 @@
 [package]
-name = "steampin"
-version = "3.0.0"
+name = "rustydpi"
+version = "4.0.0"
 edition = "2021"
 description = "Keeps Steam working where it's blocked: pins Steam to working servers and runs a Steam-only DPI bypass when needed."
 license = "MIT"
-repository = "https://github.com/CratusGod/steampin"
+repository = "https://github.com/CratusGod/rustydpi"
 build = "build.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# aws-lc for post-quantum key shares (browser-sized ClientHellos); prebuilt-nasm so no NASM/CMake is needed.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
 webpki-roots = "0.26"
 sha2 = "0.10"
 regex-lite = "0.1"
@@ -25,7 +27,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_DataExchange",
-    "Win32_System_Memory", "Win32_System_Ole", "Win32_Globalization", "Win32_System_Registry",
+    "Win32_System_Memory", "Win32_System_Ole", "Win32_Globalization", "Win32_System_Registry", "Win32_System_RemoteDesktop",
 ] }
 
 [build-dependencies]

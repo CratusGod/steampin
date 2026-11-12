@@ -1,4 +1,4 @@
-//! What SteamPin remembers between checks (state.json), and the user's settings (settings.json).
+//! What RustyDPI remembers between checks (state.json), and the user's settings (settings.json).
 
 use crate::probe::Fail;
 use chrono::NaiveDateTime;
@@ -11,13 +11,14 @@ pub fn now() -> Time { chrono::Local::now().naive_local() }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub enum Route { #[default] Unknown, Direct, Pinned, Bypass, PinnedBypass, Broken }
+pub enum Route { #[default] Unknown, Direct, Pinned, Bypass, PinnedBypass, Broken, Relay }
 
 impl Route {
     pub fn text(self) -> &'static str {
         match self {
             Route::Direct => "direct", Route::Pinned => "pinned", Route::Bypass => "bypass",
             Route::PinnedBypass => "pinned+bypass", Route::Broken => "not working", Route::Unknown => "unknown",
+            Route::Relay => "driverless",
         }
     }
 }
@@ -59,6 +60,12 @@ pub struct BypassState {
     pub hosts: Vec<String>,
     pub last_error: Option<String>,
     pub unhealthy_runs: u32,
+    /// Hosts the main strategy doesn't unblock but another one does: host -> strategy id.
+    pub overrides: BTreeMap<String, String>,
+    /// Checks in a row each bypassed host failed through the bypass.
+    pub host_fails: BTreeMap<String, u32>,
+    /// winws itself couldn't start (driver blocked, files missing), as opposed to no strategy working.
+    pub start_failed: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -81,6 +88,8 @@ pub struct State {
     pub targets: HashMap<String, TargetState>,
     pub last_pins: BTreeMap<String, String>,
     pub bypass: BypassState,
+    /// Sites served by the driverless relay: host -> the server it forwards to.
+    pub relay_routes: BTreeMap<String, String>,
 }
 
 impl State {
@@ -108,10 +117,16 @@ impl State {
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub bypass_enabled: bool,
+    /// Check and fix Steam (on by default). Off: only the sites the user added.
+    pub steam_enabled: bool,
     pub auto_restart_steam: bool,
+    /// Sites besides Steam the user wants unblocked (validated host names).
+    pub extra_sites: Vec<String>,
+    /// Hosts-file resets before this time are no longer reported (the user dismissed them).
+    pub hosts_resets_seen: Option<Time>,
 }
 
-impl Default for Settings { fn default() -> Self { Settings { bypass_enabled: true, auto_restart_steam: false } } }
+impl Default for Settings { fn default() -> Self { Settings { bypass_enabled: true, steam_enabled: true, auto_restart_steam: false, extra_sites: vec![], hosts_resets_seen: None } } }
 
 impl Settings {
     pub fn load(path: &Path) -> Settings {
@@ -143,7 +158,7 @@ mod tests {
     fn reads_v2_state() {
         // v2 (PowerShell) wrote local times without an offset; they must still load.
         let v2 = r#"{"targets":{"store.steampowered.com":{"ips":{"42.119.186.138":{"firstSeen":"2026-11-10T20:01:02","lastOk":"2026-11-10T23:36:44","failStreak":0,"lastMs":20}},"challenger":null,"challengerRuns":0,"failedRuns":0}},"lastPins":{"store.steampowered.com":"42.119.186.138"},"lastRun":"2026-11-10T23:36:44","version":"2.0.0"}"#;
-        let p = std::env::temp_dir().join(format!("steampin-v2state-{}.json", std::process::id()));
+        let p = std::env::temp_dir().join(format!("rustydpi-v2state-{}.json", std::process::id()));
         std::fs::write(&p, v2).unwrap();
         let s = State::load(&p, &|w| panic!("{w}"));
         assert_eq!(s.last_pins["store.steampowered.com"], "42.119.186.138");
@@ -153,7 +168,7 @@ mod tests {
 
     #[test]
     fn corrupt_state_warns() {
-        let p = std::env::temp_dir().join(format!("steampin-badstate-{}.json", std::process::id()));
+        let p = std::env::temp_dir().join(format!("rustydpi-badstate-{}.json", std::process::id()));
         std::fs::write(&p, "{ not json").unwrap();
         let warned = std::cell::Cell::new(false);
         let s = State::load(&p, &|_| warned.set(true));

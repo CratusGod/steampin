@@ -83,6 +83,45 @@ pub fn run_elevated(args: &str) -> i32 {
     }
 }
 
+/// Starts `exe args` as the signed-in desktop user, not elevated: when this process is elevated it
+/// borrows the token of the session's Explorer, so a tray started by the installer isn't an admin process.
+pub fn start_as_desktop_user(exe: &Path, args: &str) -> bool {
+    if !is_admin() {
+        return Command::new(exe).args(args.split_whitespace()).spawn().is_ok();
+    }
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    unsafe {
+        let mut my_session = 0u32;
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut my_session);
+        let Some(shell) = processes().into_iter().find(|p| {
+            let mut s = u32::MAX;
+            p.name.eq_ignore_ascii_case("explorer.exe") && ProcessIdToSessionId(p.pid, &mut s) != 0 && s == my_session
+        }) else { return false };
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, shell.pid);
+        if h.is_null() { return false; }
+        let mut tok: HANDLE = std::ptr::null_mut();
+        let ok = OpenProcessToken(h, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &mut tok);
+        CloseHandle(h);
+        if ok == 0 { return false; }
+        let mut primary: HANDLE = std::ptr::null_mut();
+        let ok = DuplicateTokenEx(tok, TOKEN_ALL_ACCESS, std::ptr::null(), SecurityImpersonation, TokenPrimary, &mut primary);
+        CloseHandle(tok);
+        if ok == 0 { return false; }
+        let mut cmd = wide(format!("\"{}\" {}", exe.display(), args));
+        let dir = exe.parent().map(wide);
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let ok = CreateProcessWithTokenW(primary, 0, std::ptr::null(), cmd.as_mut_ptr(), CREATE_NO_WINDOW, std::ptr::null(),
+            dir.as_ref().map(|d| d.as_ptr()).unwrap_or(std::ptr::null()), &si, &mut pi);
+        CloseHandle(primary);
+        if ok == 0 { return false; }
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        true
+    }
+}
+
 /// Runs a console program without a window; returns its exit code (or -1).
 pub fn run_hidden(exe: &str, args: &[&str]) -> i32 {
     Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW)

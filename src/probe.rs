@@ -23,15 +23,32 @@ impl ProbeResult {
 }
 
 pub trait Prober: Sync {
+    /// A check as any app would make it: through the bypass when it handles this host.
     fn probe(&self, t: &Target, ip: &str) -> ProbeResult;
+    /// A check the running bypass leaves alone: does this server work without help?
+    fn probe_direct(&self, t: &Target, ip: &str) -> ProbeResult { self.probe(t, ip) }
+    /// Like `probe_direct`, with the ClientHello cut into small TLS records as the driverless relay does it.
+    fn probe_fragmented(&self, t: &Target, ip: &str) -> ProbeResult { self.probe_direct(t, ip) }
 }
 
-pub fn tls_config() -> Arc<rustls::ClientConfig> {
-    static C: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    C.get_or_init(|| {
+/// TLS settings for probes. `big`: offer a post-quantum key share (X25519MLKEM768) first, as Chrome,
+/// Edge and Firefox do. Their ClientHello is then ~1.5 KB and spans two TCP packets, which changes
+/// what DPI sees and which bypass strategies work. Otherwise a classic ~250-byte ClientHello.
+pub fn tls_config(big: bool) -> Arc<rustls::ClientConfig> { tls(big, false) }
+
+/// `frag`: TLS records of at most `relay::RECORD` bytes, like the relay sends.
+fn tls(big: bool, frag: bool) -> Arc<rustls::ClientConfig> {
+    static C: [OnceLock<Arc<rustls::ClientConfig>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    C[big as usize + 2 * frag as usize].get_or_init(|| {
+        use rustls::crypto::aws_lc_rs::kx_group::{SECP256R1, SECP384R1, X25519, X25519MLKEM768};
+        let mut p = rustls::crypto::aws_lc_rs::default_provider();
+        p.kx_groups = if big { vec![X25519MLKEM768, X25519, SECP256R1, SECP384R1] } else { vec![X25519, SECP256R1, SECP384R1] };
         let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        let mut c = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let mut c = rustls::ClientConfig::builder_with_provider(Arc::new(p)).with_safe_default_protocol_versions().expect("TLS versions")
+            .with_root_certificates(roots).with_no_client_auth();
         c.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // rustls counts the 5-byte record header in max_fragment_size.
+        if frag { c.max_fragment_size = Some(crate::relay::RECORD + 5); }
         Arc::new(c)
     }).clone()
 }
@@ -41,9 +58,17 @@ pub struct HttpsProber { pub connect_timeout: Duration, pub total_timeout: Durat
 const MAX_BODY: usize = 256 * 1024;
 
 impl Prober for HttpsProber {
+    fn probe(&self, t: &Target, ip: &str) -> ProbeResult { self.check(t, ip, false, false) }
+    fn probe_direct(&self, t: &Target, ip: &str) -> ProbeResult { self.check(t, ip, true, false) }
+    fn probe_fragmented(&self, t: &Target, ip: &str) -> ProbeResult { self.check(t, ip, true, true) }
+}
+
+impl HttpsProber {
     /// The time reported is "TLS handshake complete" measured from the start of the TCP connect:
     /// it measures the path to the edge server (time-to-first-byte mostly measures Valve's origin).
-    fn probe(&self, t: &Target, ip: &str) -> ProbeResult {
+    /// `direct`: mark the packets so winws doesn't touch them (see `bypass::PROBE_TTL`); the ClientHello
+    /// is the first packet sent after the TTL is set, and it's the only one the bypass would change.
+    fn check(&self, t: &Target, ip: &str, direct: bool, frag: bool) -> ProbeResult {
         let Ok(addr) = ip.parse::<IpAddr>() else { return ProbeResult::failed(Fail::Other, "bad IP") };
         let start = Instant::now();
         let sock = match TcpStream::connect_timeout(&SocketAddr::new(addr, 443), self.connect_timeout) {
@@ -54,12 +79,15 @@ impl Prober for HttpsProber {
                 _ => ProbeResult::failed(Fail::Unreachable, format!("connect failed ({})", e.kind())),
             },
         };
+        if direct && addr.is_ipv4() && sock.set_ttl(crate::bypass::PROBE_TTL).is_err() {
+            return ProbeResult::failed(Fail::Other, "could not mark the check");
+        }
         let left = |d: Duration| d.saturating_sub(start.elapsed()).max(Duration::from_millis(50));
         let _ = sock.set_nodelay(true);
         let _ = sock.set_read_timeout(Some(left(self.total_timeout)));
         let _ = sock.set_write_timeout(Some(left(self.total_timeout)));
         let Ok(name) = ServerName::try_from(t.name.clone()) else { return ProbeResult::failed(Fail::Other, "bad host name") };
-        let Ok(conn) = rustls::ClientConnection::new(tls_config(), name) else { return ProbeResult::failed(Fail::Other, "TLS setup failed") };
+        let Ok(conn) = rustls::ClientConnection::new(tls(t.big_hello, frag), name) else { return ProbeResult::failed(Fail::Other, "TLS setup failed") };
         let mut tls = rustls::StreamOwned::new(conn, sock);
         while tls.conn.is_handshaking() {
             if let Err(e) = tls.conn.complete_io(&mut tls.sock) {
@@ -68,7 +96,7 @@ impl Prober for HttpsProber {
         }
         let ms = (start.elapsed().as_secs_f64() * 1000.0).round();
         let req = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) SteamPin/3\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) RustyDPI/4\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
             t.path, t.name);
         if let Err(e) = tls.write_all(req.as_bytes()).and_then(|_| tls.flush()) {
             return if is_timeout(&e) { ProbeResult::failed(Fail::Timeout, "timeout") } else { ProbeResult::failed(Fail::TlsReset, "connection reset after TLS") };
@@ -194,10 +222,10 @@ pub fn http_get(url: &str, timeout: Duration, accept: &str) -> Result<(u16, Stri
     let sock = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
     sock.set_read_timeout(Some(timeout)).ok();
     sock.set_write_timeout(Some(timeout)).ok();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: SteamPin/3\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: RustyDPI/4\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
     let raw = if https {
         let name = ServerName::try_from(host.to_string()).map_err(|e| e.to_string())?;
-        let conn = rustls::ClientConnection::new(tls_config(), name).map_err(|e| e.to_string())?;
+        let conn = rustls::ClientConnection::new(tls_config(false), name).map_err(|e| e.to_string())?;
         let mut tls = rustls::StreamOwned::new(conn, sock);
         tls.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
         read_response(&mut tls, start, timeout).map_err(|e| e.to_string())?
@@ -216,6 +244,66 @@ mod tests {
 
     fn login() -> Target {
         Target { name: "login.steampowered.com".into(), expect_status: vec![302], expect_redirect: Some(r"^https://([a-z0-9-]+\.)*steampowered\.com/".into()), ..Default::default() }
+    }
+
+    #[test]
+    fn browser_sized_client_hello_spans_two_packets() {
+        let len = |big: bool| {
+            let mut c = rustls::ClientConnection::new(tls_config(big), ServerName::try_from("store.steampowered.com").unwrap()).unwrap();
+            let mut out = Vec::new();
+            c.write_tls(&mut out).unwrap();
+            out.len()
+        };
+        assert!(len(false) < 400, "classic hello fits one packet: {}", len(false));
+        assert!(len(true) > 1460, "post-quantum hello needs two packets (MSS 1460): {}", len(true));
+    }
+
+    /// Research, not a regular test: can a driverless bypass (no WinDivert) get through this network?
+    /// RDPI_HOST=store.steampowered.com RDPI_IPS=23.200.182.104 cargo test --release driverless -- --ignored --nocapture
+    /// Pick a host winws doesn't handle (pinned hosts are in its exclude list) and IPs where it's blocked.
+    #[test]
+    #[ignore]
+    fn driverless_live() {
+        let host = std::env::var("RDPI_HOST").expect("RDPI_HOST");
+        let ips = std::env::var("RDPI_IPS").expect("RDPI_IPS");
+        let attempt = |ip: &str, frag: Option<usize>, split_sni: bool, big: bool| -> String {
+            let mut p = rustls::crypto::aws_lc_rs::default_provider();
+            use rustls::crypto::aws_lc_rs::kx_group::{X25519, X25519MLKEM768};
+            p.kx_groups = if big { vec![X25519MLKEM768, X25519] } else { vec![X25519] };
+            let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(p)).with_safe_default_protocol_versions().unwrap()
+                .with_root_certificates(roots).with_no_client_auth();
+            cfg.max_fragment_size = frag;
+            let mut c = rustls::ClientConnection::new(Arc::new(cfg), ServerName::try_from(host.clone()).unwrap()).unwrap();
+            let start = Instant::now();
+            let mut s = match TcpStream::connect_timeout(&SocketAddr::new(ip.parse().unwrap(), 443), Duration::from_secs(3)) { Ok(s) => s, Err(e) => return format!("connect: {e}") };
+            s.set_nodelay(true).ok();
+            s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            // Marked so an installed winws (4.0 overnight build or later) leaves it alone: a clean test.
+            s.set_ttl(crate::bypass::PROBE_TTL).ok();
+            let mut hello = Vec::new();
+            while c.wants_write() { c.write_tls(&mut hello).unwrap(); }
+            // TCP split in the middle of the host name, so no single packet carries the whole SNI.
+            let cut = if split_sni { find(&hello, host.as_bytes()).map(|i| i + host.len() / 2).unwrap_or(1) } else { hello.len() };
+            for part in [&hello[..cut], &hello[cut..]] {
+                if part.is_empty() { continue; }
+                if let Err(e) = s.write_all(part) { return format!("send: {e}"); }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            while c.is_handshaking() {
+                if let Err(e) = c.complete_io(&mut s) { return format!("FAIL {} ({} ms)", classify_tls_error(&e).reason, start.elapsed().as_millis()); }
+            }
+            format!("OK ({} ms, hello {} bytes)", start.elapsed().as_millis(), hello.len())
+        };
+        for ip in ips.split(',') {
+            println!("{ip}:");
+            for (label, frag, split, big) in [("plain", None, false, false), ("plain, browser-sized", None, false, true),
+                                              ("TLS records of 64 B", Some(64), false, false), ("TLS records of 64 B, browser-sized", Some(64), false, true),
+                                              ("TCP split mid-SNI", None, true, false), ("TCP split mid-SNI, browser-sized", None, true, true),
+                                              ("records + TCP split", Some(64), true, false), ("records + TCP split, browser-sized", Some(64), true, true)] {
+                println!("  {label:<38} {}", attempt(ip, frag, split, big));
+            }
+        }
     }
 
     #[test]

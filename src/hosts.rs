@@ -1,12 +1,15 @@
-//! SteamPin's managed block in the Windows hosts file. Never touches other lines.
+//! RustyDPI's managed block in the Windows hosts file. Never touches other lines.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-pub const BEGIN_PREFIX: &str = "# BEGIN SteamPin";
-pub const BEGIN_MARK: &str = "# BEGIN SteamPin - managed automatically, edits inside this block are overwritten";
-pub const END_MARK: &str = "# END SteamPin";
-pub const LEGACY_TAG: &str = "# local VN Steam cache node - pinned; delete this line to undo"; // SteamPin v1
+pub const BEGIN_PREFIX: &str = "# BEGIN RustyDPI";
+pub const BEGIN_MARK: &str = "# BEGIN RustyDPI - managed automatically, edits inside this block are overwritten";
+pub const END_MARK: &str = "# END RustyDPI";
+/// The same block as written by SteamPin 3 (RustyDPI's earlier name): adopted and rewritten.
+pub const OLD_BEGIN_PREFIX: &str = "# BEGIN SteamPin";
+pub const OLD_END_MARK: &str = "# END SteamPin";
+pub const LEGACY_TAG: &str = "# local VN Steam cache node - pinned; delete this line to undo"; // RustyDPI v1
 pub const BACKUPS_KEPT: usize = 5;
 
 #[derive(Default, Debug)]
@@ -46,28 +49,35 @@ pub fn to_lines(text: &str) -> Vec<String> {
 pub fn split(lines: &[String], names: &[String]) -> Split {
     let mut s = Split::default();
     let mut in_block = false;
+    // Lines inside an open block that aren't RustyDPI pins. If the END line is missing, the "block" runs to
+    // the end of the file and these are most likely the user's own entries: keep them.
+    let mut foreign_in_block: Vec<String> = Vec::new();
     for l in lines {
-        if l.starts_with(BEGIN_PREFIX) { in_block = true; s.saw_block = true; continue; }
-        if in_block && l == END_MARK { in_block = false; continue; }
+        if l.starts_with(BEGIN_PREFIX) || l.starts_with(OLD_BEGIN_PREFIX) { in_block = true; s.saw_block = true; foreign_in_block.clear(); continue; }
+        if in_block && (l == END_MARK || l == OLD_END_MARK) { in_block = false; foreign_in_block.clear(); continue; }
         let legacy = l.contains(LEGACY_TAG);
         if in_block || legacy {
             if legacy { s.had_legacy = true; }
             let mut parts = l.split_whitespace();
+            let mut ours = false;
             if let (Some(ip), Some(n)) = (parts.next(), parts.next()) {
                 let n = n.to_ascii_lowercase();
-                if !ip.starts_with('#') && crate::iputil::is_public_ipv4(ip) && names.contains(&n) && !s.pins.contains_key(&n) {
-                    s.pins.insert(n, ip.to_string());
+                if !ip.starts_with('#') && (crate::iputil::is_public_ipv4(ip) || crate::relay::is_relay_ip(ip)) && names.contains(&n) {
+                    ours = true;
+                    s.pins.entry(n).or_insert_with(|| ip.to_string());
                 }
             }
+            if in_block && !ours && !legacy { foreign_in_block.push(l.clone()); }
             continue;
         }
         s.other.push(l.clone());
     }
     s.unterminated = in_block;
+    if s.unterminated { s.other.extend(foreign_in_block.into_iter().filter(|l| !l.trim().is_empty())); }
     s
 }
 
-/// Names that also appear on an active line outside SteamPin's block (the user's own entries).
+/// Names that also appear on an active line outside RustyDPI's block (the user's own entries).
 pub fn foreign_entries(other: &[String], names: &[String]) -> Vec<String> {
     let mut found = Vec::new();
     for l in other {
@@ -112,7 +122,7 @@ pub fn write(path: &Path, backup_dir: &Path, text: &str, enc: Enc) -> Result<(),
 fn write_inner(path: &Path, backup_dir: &Path, text: &str, enc: Enc) -> Result<(), String> {
     backup(path, backup_dir);
     let dir = path.parent().ok_or("bad hosts path")?;
-    let tmp = dir.join("hosts.steampin.tmp");
+    let tmp = dir.join("hosts.rustydpi.tmp");
     std::fs::write(&tmp, encode(text, enc)).map_err(|e| format!("Could not write the hosts file: {e}"))?;
     let mut done = false;
     let mut err = String::new();
@@ -159,6 +169,17 @@ mod tests {
 
     fn names() -> Vec<String> { ["store.steampowered.com", "api.steampowered.com", "login.steampowered.com"].map(String::from).to_vec() }
 
+    #[test]
+    fn adopts_steampin_block() {
+        let lines: Vec<String> = ["127.0.0.1 localhost", "", "# BEGIN SteamPin - managed automatically, edits inside this block are overwritten",
+            "42.119.186.138\tstore.steampowered.com", "# END SteamPin", "10.0.0.5 nas"].map(String::from).to_vec();
+        let s = split(&lines, &names());
+        assert_eq!(s.pins["store.steampowered.com"], "42.119.186.138");
+        assert_eq!(s.other, vec!["127.0.0.1 localhost", "", "10.0.0.5 nas"]);
+        let out = render(&s.other, &BTreeMap::from([("store.steampowered.com".to_string(), Some("42.119.186.138".to_string()))]), &names());
+        assert!(!out.contains("SteamPin") && out.contains("# BEGIN RustyDPI") && out.contains("# END RustyDPI"));
+    }
+
     fn sample() -> Vec<String> {
         vec![
             "# Copyright (c) Microsoft Corp.".into(), "# ghi chú tiếng Việt".into(), "".into(),
@@ -170,7 +191,7 @@ mod tests {
     }
 
     pub fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("steampin-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let d = std::env::temp_dir().join(format!("rustydpi-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -190,6 +211,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_end_line_keeps_the_users_own_entries() {
+        let lines: Vec<String> = ["127.0.0.1 localhost", BEGIN_MARK, "42.119.186.138\tstore.steampowered.com", "", "10.0.0.5 nas", "0.0.0.0 ads.example.com"]
+            .map(String::from).to_vec();
+        let s = split(&lines, &names());
+        assert!(s.unterminated);
+        assert_eq!(s.pins["store.steampowered.com"], "42.119.186.138");
+        assert_eq!(s.other, vec!["127.0.0.1 localhost", "10.0.0.5 nas", "0.0.0.0 ads.example.com"]);
+        let out = render(&s.other, &BTreeMap::from([("store.steampowered.com".to_string(), Some("42.119.186.138".to_string()))]), &names());
+        assert!(out.contains("10.0.0.5 nas") && out.contains(END_MARK));
+        assert_eq!(out.matches("store.steampowered.com").count(), 1);
+    }
+
+    #[test]
     fn renders_block_at_end_crlf() {
         let s = split(&sample(), &names());
         let mut pins = BTreeMap::new();
@@ -201,7 +235,7 @@ mod tests {
         assert!(text.contains("42.119.186.138\tstore.steampowered.com"));
         assert!(!text.contains("api.steampowered.com"));
         assert!(!text.contains(LEGACY_TAG));
-        assert!(!render(&s.other, &BTreeMap::new(), &names()).contains("SteamPin"));
+        assert!(!render(&s.other, &BTreeMap::new(), &names()).contains("RustyDPI"));
     }
 
     #[test]
@@ -233,7 +267,7 @@ mod tests {
         let b = backups(&d.join("backups"));
         assert_eq!(b.len(), 5);
         assert!(std::fs::read_to_string(&b[0]).unwrap().contains("42.119.186.105"));
-        assert!(!d.join("hosts.steampin.tmp").exists());
+        assert!(!d.join("hosts.rustydpi.tmp").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1,4 +1,4 @@
-//! Command line: SteamPin.exe --status | --check [--full] | --retest | --dry-run | --test | --diagnose | --unpin | --install | --uninstall
+//! Command line: RustyDPI.exe --status | --check [--full] | --retest | --dry-run | --test | --diagnose | --unpin | --install | --uninstall
 
 use crate::bypass::Runner;
 use crate::config::Config;
@@ -8,9 +8,9 @@ use crate::paths::{Log, Paths};
 use crate::probe::HttpsProber;
 use std::time::Duration;
 
-const HELP: &str = "SteamPin 3 - keeps Steam working where it's blocked.
+const HELP: &str = "RustyDPI 4 - unblocks websites and Steam where they're blocked.
 
-  SteamPin.exe              open the window
+  RustyDPI.exe              open the window
   --status                  last check and current routes
   --check [--full]          ask the service to check now (--full re-checks everything)
   --retest                  ask the service to find the best bypass strategy again
@@ -18,8 +18,8 @@ const HELP: &str = "SteamPin 3 - keeps Steam working where it's blocked.
   --test                    probe every known server and print a speed table
   --diagnose                run the diagnosis and print it
   --restart-steam [--force] restart the Steam client (refuses while a game runs, unless --force)
-  --unpin                   remove SteamPin's entries from the hosts file (admin)
-  --install / --uninstall   install or remove SteamPin (admin)
+  --unpin                   remove RustyDPI's entries from the hosts file (admin)
+  --install / --uninstall   install or remove RustyDPI (admin)
 ";
 
 /// The CLI never starts winws: only the service does.
@@ -40,7 +40,7 @@ pub fn run(args: &[String]) -> i32 {
         "--uninstall" => {
             if crate::win::is_admin() { crate::installer::uninstall(&say) }
             else if has("--quiet") { 5 }
-            else { let c = crate::win::run_elevated("--uninstall"); say(if c == 0 { "SteamPin was removed." } else { "Uninstall was cancelled." }); c }
+            else { let c = crate::win::run_elevated("--uninstall"); say(if c == 0 { "RustyDPI was removed." } else { "Uninstall was cancelled." }); c }
         }
         "--repair" => crate::installer::repair(&say),
         "--hosts-writable" => crate::installer::hosts_writable(),
@@ -54,7 +54,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 None => {
                     print!("{}", std::fs::read_to_string(paths.last_check()).unwrap_or_else(|_| "No check has run yet.\n".into()));
-                    say("The SteamPin service isn't running.");
+                    say("The RustyDPI service isn't running.");
                 }
             }
             0
@@ -63,21 +63,24 @@ pub fn run(args: &[String]) -> i32 {
             let cmd = if args[0] == "--retest" { "retest" } else if has("--full") { "fix" } else { "check" };
             match crate::ipc::send(cmd, None, Duration::from_secs(5)) {
                 Some(_) => { say("Check started; see --status in a minute."); 0 }
-                None => { say("The SteamPin service isn't running."); 2 }
+                None => { say("The RustyDPI service isn't running."); 2 }
             }
         }
         "--diagnose" => {
             let mut checks = match crate::ipc::send("diagnose", None, Duration::from_secs(60)) {
                 Some(r) => r.checks.unwrap_or_default(),
-                None => vec![crate::diag::DiagCheck { id: "service".into(), title: "SteamPin service".into(), level: crate::diag::Level::Fail, detail: "Not running. Reinstall SteamPin.".into(), ..Default::default() }],
+                None => vec![crate::diag::DiagCheck { id: "service".into(), title: "RustyDPI service".into(), level: crate::diag::Level::Fail, detail: "Not running. Reinstall RustyDPI.".into(), ..Default::default() }],
             };
             let lhc = crate::ipc::send("status", None, Duration::from_secs(5)).and_then(|r| r.status).and_then(|s| s.last_hosts_change);
             checks.extend(crate::diag::user_checks(lhc));
-            for c in checks { say(&format!("[{:<4}] {}: {}", format!("{:?}", c.level).to_uppercase(), c.title, c.detail)); }
+            for c in checks {
+                say(&format!("[{:<4}] {}: {}", format!("{:?}", c.level).to_uppercase(), c.title, c.detail));
+                if c.level >= crate::diag::Level::Warn { for l in c.help.lines() { say(&format!("         {l}")); } }
+            }
             0
         }
         "--dry-run" | "--test" => {
-            let cfg = Config::load(&paths.config()).unwrap_or_else(|_| Config::default_config());
+            let cfg = crate::service::effective_config(&paths, &|e| say(e));
             let net = RealNet { cfg: &cfg, flush: false };
             let prober = HttpsProber { connect_timeout: Duration::from_secs(cfg.connect_timeout_sec), total_timeout: Duration::from_secs(cfg.probe_timeout_sec) };
             let log = Log::new(None, !has("--json"));
@@ -93,7 +96,7 @@ pub fn run(args: &[String]) -> i32 {
                 if r.hosts_changed { say("(the hosts file would change)"); }
             } else {
                 for (t, dns, results) in engine.test_all() {
-                    say(&format!("{}  (DNS: {})", t.name, if dns.is_empty() { "nothing usable".into() } else { dns.join(", ") }));
+                    say(&format!("{}  (DNS: {})", cfg.shown(&t.name), if dns.is_empty() { "nothing usable".into() } else { dns.join(", ") }));
                     for m in results {
                         say(&format!("   {:<16} {}/{}  {:>8}  {}", m.ip, m.pass, m.total, m.ms.map(|x| format!("{x} ms")).unwrap_or_default(), if m.all_passed() { "" } else { &m.reason }));
                     }

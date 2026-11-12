@@ -1,5 +1,5 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
-//! SteamPin 3 - keeps Steam working where it's blocked.
+//! RustyDPI 4 - unblocks websites and Steam where they're blocked.
 //!
 //! One small exe with four roles:
 //!   --service  the Windows service (LocalSystem) that does the work
@@ -21,6 +21,7 @@ mod net;
 mod paths;
 mod pinlogic;
 mod probe;
+mod relay;
 mod service;
 mod state;
 mod tray;

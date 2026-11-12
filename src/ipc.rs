@@ -1,5 +1,6 @@
 //! Messages between the window/tray (run as the user) and the service (runs as SYSTEM),
-//! over a local named pipe. Any signed-in user may ask for status or a check; no command takes free text.
+//! over a local named pipe. Any signed-in user may ask for status or a check; the only text a command
+//! takes is a list of site names, each validated as a host name before use.
 
 use crate::diag::DiagCheck;
 use crate::engine::RunReport;
@@ -8,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::Duration;
 
-pub const PIPE: &str = r"\\.\pipe\SteamPin.v3";
+pub const PIPE: &str = r"\\.\pipe\RustyDPI.v4";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct Request { pub cmd: String, pub flag: Option<bool> }
+pub struct Request { pub cmd: String, pub flag: Option<bool>, pub sites: Option<Vec<String>> }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,7 +39,10 @@ pub struct ServiceStatus {
 
 /// Sends one request and waits up to `timeout` for the answer. None when the service isn't there.
 pub fn send(cmd: &str, flag: Option<bool>, timeout: Duration) -> Option<Response> {
-    let req = Request { cmd: cmd.into(), flag };
+    send_request(Request { cmd: cmd.into(), flag, sites: None }, timeout)
+}
+
+pub fn send_request(req: Request, timeout: Duration) -> Option<Response> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let r = (|| -> Option<Response> {
@@ -91,7 +95,7 @@ pub fn serve(stop: &std::sync::atomic::AtomicBool, handle: &(dyn Fn(Request) -> 
             s.spawn(move || {
                 use std::os::windows::io::FromRawHandle;
                 let f = unsafe { std::fs::File::from_raw_handle(hv as _) };
-                let mut reader = BufReader::new((&f).take(4096));
+                let mut reader = BufReader::new((&f).take(16 * 1024));
                 let mut line = String::new();
                 let resp = match reader.read_line(&mut line) {
                     Ok(_) => match serde_json::from_str::<Request>(&line) {

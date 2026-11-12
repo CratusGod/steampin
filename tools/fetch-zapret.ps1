@@ -1,5 +1,5 @@
-# Downloads the official zapret release and copies the Windows files SteamPin embeds into vendor\zapret,
-# checking every file against the SHA-256 that SteamPin also checks at run time (src\bypass.rs).
+# Downloads the official zapret release and copies the Windows files RustyDPI embeds into vendor\zapret,
+# checking every file against the SHA-256 that RustyDPI also checks at run time (src\bypass.rs).
 $ErrorActionPreference = 'Stop'
 $ver = 'v72.13'
 $root = Split-Path -Parent $PSScriptRoot

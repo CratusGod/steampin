@@ -1,4 +1,4 @@
-//! Where SteamPin keeps things, and its log. Tests point these at temp folders.
+//! Where RustyDPI keeps things, and its log. Tests point these at temp folders.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,9 @@ impl Paths {
     pub fn default_paths() -> Paths {
         let pf = std::env::var("ProgramW6432").or_else(|_| std::env::var("ProgramFiles")).unwrap_or_else(|_| "C:\\Program Files".into());
         let pd = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
-        Paths { install_dir: Path::new(&pf).join("SteamPin"), data_dir: Path::new(&pd).join("SteamPin"), hosts: crate::hosts::system_path() }
+        Paths { install_dir: Path::new(&pf).join("RustyDPI"), data_dir: Path::new(&pd).join("RustyDPI"), hosts: crate::hosts::system_path() }
     }
-    pub fn exe(&self) -> PathBuf { self.install_dir.join("SteamPin.exe") }
+    pub fn exe(&self) -> PathBuf { self.install_dir.join("RustyDPI.exe") }
     pub fn zapret_dir(&self) -> PathBuf { self.install_dir.join("zapret") }
     pub fn config(&self) -> PathBuf { self.data_dir.join("config.json") }
     pub fn state(&self) -> PathBuf { self.data_dir.join("state.json") }

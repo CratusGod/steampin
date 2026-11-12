@@ -18,7 +18,7 @@ pub struct Decision { pub pin: Option<String>, pub action: &'static str, pub not
 
 pub fn summarize(ip: &str, probes: &[ProbeResult]) -> Measurement {
     let mut ok: Vec<f64> = probes.iter().filter(|p| p.ok).filter_map(|p| p.ms).collect();
-    ok.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ok.sort_by(|a, b| a.total_cmp(b));
     let median = if ok.is_empty() { None } else { Some(ok[(ok.len() - 1) / 2]) };
     let last_fail = probes.iter().rev().find(|p| !p.ok);
     Measurement {

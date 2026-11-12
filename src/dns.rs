@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub const TYPE_A: u16 = 1;
 pub const TYPE_CNAME: u16 = 5;
 pub const TYPE_TXT: u16 = 16;
+pub const TYPE_AAAA: u16 = 28;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Answer { pub rtype: u16, pub data: String }
@@ -75,6 +76,11 @@ pub fn parse_response(b: &[u8], id: u16) -> Option<Vec<Answer>> {
         if p + rdlen > b.len() { break; }
         match rtype {
             TYPE_A if rdlen == 4 => out.push(Answer { rtype, data: format!("{}.{}.{}.{}", b[p], b[p + 1], b[p + 2], b[p + 3]) }),
+            TYPE_AAAA if rdlen == 16 => {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&b[p..p + 16]);
+                out.push(Answer { rtype, data: std::net::Ipv6Addr::from(a).to_string() });
+            }
             TYPE_CNAME => out.push(Answer { rtype, data: read_name(b, p) }),
             TYPE_TXT => {
                 let mut s = String::new();
@@ -133,6 +139,12 @@ fn rand16() -> u16 {
     h.finish() as u16
 }
 
+/// Global unicast IPv6 addresses (2000::/3) for `name`.
+pub fn query_aaaa(server: &str, name: &str, timeout: Duration) -> Vec<String> {
+    query(server, name, TYPE_AAAA, timeout).map(|v| v.into_iter().filter(|a| a.rtype == TYPE_AAAA)
+        .filter(|a| a.data.parse::<std::net::Ipv6Addr>().map(|ip| ip.segments()[0] & 0xe000 == 0x2000).unwrap_or(false)).map(|a| a.data).collect()).unwrap_or_default()
+}
+
 pub fn query_a(server: &str, name: &str, timeout: Duration) -> Vec<String> {
     query(server, name, TYPE_A, timeout).map(|v| v.into_iter().filter(|a| a.rtype == TYPE_A).map(|a| a.data).collect()).unwrap_or_default()
 }
@@ -173,6 +185,25 @@ mod tests {
         r.extend_from_slice(&[0xC0, 12, 0, 16, 0, 1, 0, 0, 0, 20, 0, (txt.len() + 1) as u8, txt.len() as u8]);
         r.extend_from_slice(txt);
         assert_eq!(parse_response(&r, 9).unwrap()[0].data, "18403 | 42.118.0.0/15 | VN");
+    }
+
+    #[test]
+    fn parses_aaaa() {
+        let q = build_query(11, "a.b", TYPE_AAAA).unwrap();
+        let mut r = q.clone();
+        r[2] = 0x81; r[3] = 0x80; r[7] = 1;
+        r.extend_from_slice(&[0xC0, 12, 0, 28, 0, 1, 0, 0, 0, 20, 0, 16]);
+        r.extend_from_slice(&[0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x1a, 0x04, 0xbc]);
+        assert_eq!(parse_response(&r, 11).unwrap()[0].data, "2606:4700::681a:4bc");
+    }
+
+    /// Live: AAAA from a public resolver (needs internet).
+    #[test]
+    #[ignore]
+    fn aaaa_live() {
+        let a = query_aaaa("8.8.8.8", "www.cloudflare.com", Duration::from_secs(3));
+        println!("{a:?}");
+        assert!(!a.is_empty());
     }
 
     #[test]

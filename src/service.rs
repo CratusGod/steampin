@@ -13,7 +13,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub const SERVICE_NAME: &str = "SteamPin";
+pub const SERVICE_NAME: &str = "RustyDPI";
+
+/// What gets checked: config.json (or the built-in config) plus the user's settings (Steam on or off,
+/// their own sites). The service and the command line's --dry-run/--test use the same.
+pub fn effective_config(paths: &Paths, on_error: &dyn Fn(&str)) -> Config {
+    let mut c = Config::load(&paths.config()).unwrap_or_else(|e| {
+        on_error(&format!("config.json is invalid ({e}); using the built-in defaults"));
+        Config::default_config()
+    });
+    let settings = Settings::load(&paths.settings());
+    if !settings.steam_enabled { c.targets.clear(); c.seeds.clear(); c.bypass_domains.clear(); }
+    c.add_sites(&settings.extra_sites);
+    c
+}
 
 #[derive(Default)]
 struct Shared {
@@ -31,6 +44,7 @@ pub struct Core {
     paths: Paths,
     log: Log,
     runner: WinwsRunner,
+    relay: crate::relay::Relay,
     shared: Mutex<Shared>,
     wake: Condvar,
     stop: AtomicBool,
@@ -42,7 +56,7 @@ impl Core {
         let _ = std::fs::create_dir_all(&paths.data_dir);
         let last = std::fs::read_to_string(paths.status()).ok().and_then(|s| serde_json::from_str(&s).ok());
         Arc::new(Core {
-            log: Log::new(Some(paths.log()), false), runner: WinwsRunner::new(paths.bypass()), paths,
+            log: Log::new(Some(paths.log()), false), runner: WinwsRunner::new(paths.bypass()), relay: crate::relay::Relay::new(), paths,
             shared: Mutex::new(Shared { last, ..Default::default() }), wake: Condvar::new(), stop: AtomicBool::new(false), settings_lock: Mutex::new(()),
         })
     }
@@ -50,6 +64,7 @@ impl Core {
     /// Starts the worker threads; returns their handles.
     pub fn start(self: &Arc<Self>) -> Vec<std::thread::JoinHandle<()>> {
         self.log.info(&format!("service {} started", crate::engine::VERSION));
+        self.resume_bypass();
         self.request(RunKind::Full);
         let mut hs = Vec::new();
         let c = self.clone(); hs.push(std::thread::spawn(move || c.run_loop()));
@@ -69,6 +84,25 @@ impl Core {
         self.log.info("service stopped");
     }
 
+    /// Right after boot, start the bypass that worked last time, so sites open at once instead of after
+    /// the first check (which then confirms it, or replaces it if the network changed).
+    fn resume_bypass(&self) {
+        if !Settings::load(&self.paths.settings()).bypass_enabled { return; }
+        let st = State::load(&self.paths.state(), &|_| {});
+        // Sites on the driverless relay: the hosts file already points them at it.
+        if !st.relay_routes.is_empty() {
+            use crate::relay::Routes;
+            if let Err(e) = self.relay.set_routes(st.relay_routes.clone()) { self.log.warn(&e); }
+        }
+        let files = self.paths.bypass();
+        let Some(s) = crate::bypass::find(st.bypass.strategy.as_deref()) else { return };
+        if st.bypass.hosts.is_empty() || st.bypass.last_error.is_some() || !files.host_list().exists() { return; }
+        match self.runner.start(&crate::bypass::build_args(s, &files, &st.bypass.overrides)) {
+            Ok(()) => self.log.info(&format!("bypass resumed ({}) until the first check confirms it", s.name)),
+            Err(e) => self.log.warn(&format!("bypass could not resume: {e}")),
+        }
+    }
+
     pub fn on_resume(&self) { self.log.info("resumed from sleep"); self.request_in(RunKind::Periodic, 20); }
 
     pub fn request(&self, kind: RunKind) {
@@ -86,12 +120,7 @@ impl Core {
         self.wake.notify_all();
     }
 
-    fn config(&self) -> Config {
-        Config::load(&self.paths.config()).unwrap_or_else(|e| {
-            self.log.error(&format!("config.json is invalid ({e}); using the built-in defaults"));
-            Config::default_config()
-        })
-    }
+    fn config(&self) -> Config { effective_config(&self.paths, &|e| self.log.error(e)) }
 
     fn run_loop(&self) {
         while !self.stop.load(Ordering::SeqCst) {
@@ -125,12 +154,13 @@ impl Core {
         let prober = HttpsProber { connect_timeout: Duration::from_secs(cfg.connect_timeout_sec), total_timeout: Duration::from_secs(cfg.probe_timeout_sec) };
         let mut engine = Engine::new(&cfg, &self.paths, &net, &prober, &self.runner, &self.log);
         engine.force_strategy_test = force;
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.run(kind)));
+        engine.relay = Some(&self.relay);
+        // Release builds abort on a panic (the panic hook logs it and Windows restarts the service in 5 s),
+        // so there's nothing to catch here.
+        let r = engine.run(kind);
         let mut s = self.shared.lock().unwrap();
-        match r {
-            Ok(r) => { if r.hosts_changed { s.last_hosts_change = Some(state::now()); } s.last = Some(r); }
-            Err(_) => self.log.error("check failed unexpectedly"),
-        }
+        if r.steam_hosts_changed { s.last_hosts_change = Some(state::now()); }
+        s.last = Some(r);
         s.busy = false;
         s.activity = None;
     }
@@ -177,9 +207,16 @@ impl Core {
 
     fn change_settings(&self, f: impl FnOnce(&mut Settings)) {
         let _g = self.settings_lock.lock().unwrap();
-        let mut s = Settings::load(&self.paths.settings());
+        let path = self.paths.settings();
+        // An unreadable settings.json (hand-edited?) would be replaced by defaults here, losing the user's
+        // sites: keep a copy first.
+        if std::fs::read_to_string(&path).map(|t| serde_json::from_str::<Settings>(&t).is_err()).unwrap_or(false) {
+            let _ = std::fs::copy(&path, path.with_extension("json.bad"));
+            self.log.warn("settings.json was unreadable; a copy was kept as settings.json.bad");
+        }
+        let mut s = Settings::load(&path);
         f(&mut s);
-        let _ = s.save(&self.paths.settings());
+        let _ = s.save(&path);
     }
 
     fn status(&self) -> ServiceStatus {
@@ -207,6 +244,44 @@ impl Core {
                 ok(Some(self.status()))
             }
             ("autorestart", Some(on)) => { self.change_settings(|s| s.auto_restart_steam = on); ok(Some(self.status())) }
+            ("steam", Some(on)) => {
+                self.change_settings(|s| s.steam_enabled = on);
+                self.log.info(&format!("Steam turned {} by the user", if on { "on" } else { "off" }));
+                self.request(RunKind::Periodic);
+                ok(Some(self.status()))
+            }
+            ("sites", _) => {
+                let mut list: Vec<String> = Vec::new();
+                for s in req.sites.unwrap_or_default().iter().filter_map(|s| crate::config::clean_site(s)) {
+                    if !list.contains(&s) && list.len() < crate::config::MAX_SITES { list.push(s); }
+                }
+                let old = Settings::load(&self.paths.settings()).extra_sites;
+                if list != old {
+                    self.log.info(&format!("other sites changed by the user: {} now", list.len()));
+                    self.change_settings(|s| s.extra_sites = list);
+                    self.request(RunKind::Periodic);
+                }
+                ok(Some(self.status()))
+            }
+            // One site at a time, changed under the settings lock: two quick adds can't undo each other.
+            (c @ ("add-site" | "remove-site"), _) => {
+                let Some(site) = req.sites.unwrap_or_default().first().and_then(|s| crate::config::clean_site(s)) else {
+                    return Response { ok: false, error: Some("not a site name".into()), ..Default::default() };
+                };
+                let add = c == "add-site";
+                let mut changed = false;
+                self.change_settings(|s| {
+                    let had = s.extra_sites.contains(&site);
+                    if add && !had && s.extra_sites.len() < crate::config::MAX_SITES { s.extra_sites.push(site.clone()); changed = true; }
+                    if !add && had { s.extra_sites.retain(|x| x != &site); changed = true; }
+                });
+                if changed {
+                    self.log.info(&format!("other sites changed by the user: {} now", Settings::load(&self.paths.settings()).extra_sites.len()));
+                    self.request(RunKind::Periodic);
+                }
+                ok(Some(self.status()))
+            }
+            ("hosts-seen", _) => { self.change_settings(|s| s.hosts_resets_seen = Some(state::now())); ok(Some(self.status())) }
             ("log", _) => Response { ok: true, lines: Some(crate::paths::tail(&self.paths.log(), 300)), ..Default::default() },
             ("diagnose", _) => {
                 let last = self.shared.lock().unwrap().last.clone();
@@ -228,6 +303,11 @@ pub fn run_dispatcher() -> Result<(), String> {
 fn service_main(_args: Vec<std::ffi::OsString>) {
     use windows_service::service::*;
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    // A bug must leave a trace: write it to the log before the process aborts.
+    let log_path = Paths::default_paths().log();
+    std::panic::set_hook(Box::new(move |info| {
+        Log::new(Some(log_path.clone()), false).error(&format!("RustyDPI crashed: {info}. Windows restarts the service in a few seconds."));
+    }));
     let core = Core::new(Paths::default_paths());
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let c2 = core.clone();
@@ -251,3 +331,25 @@ fn service_main(_args: Vec<std::ffi::OsString>) {
 }
 
 type ServiceStatus_ = windows_service::service::ServiceStatus;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_commands_change_one_site_at_a_time() {
+        let d = std::env::temp_dir().join(format!("rustydpi-svc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let core = Core::new(Paths { install_dir: d.join("i"), data_dir: d.join("d"), hosts: d.join("hosts") });
+        let send = |cmd: &str, site: &str| core.handle(Request { cmd: cmd.into(), flag: None, sites: Some(vec![site.into()]) });
+        assert!(send("add-site", "https://Example.COM/page").ok);
+        assert!(send("add-site", "second.example.org").ok);
+        assert!(send("add-site", "example.com").ok, "a duplicate is fine, and not added twice");
+        assert!(!send("add-site", "not a site").ok);
+        let sites = || Settings::load(&core.paths.settings()).extra_sites;
+        assert_eq!(sites(), vec!["example.com", "second.example.org"]);
+        assert!(send("remove-site", "example.com").ok);
+        assert_eq!(sites(), vec!["second.example.org"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

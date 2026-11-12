@@ -46,7 +46,7 @@ unsafe fn add_icon() {
     n.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     n.uCallbackMessage = WM_TRAY;
     n.hIcon = icon();
-    copy_into(&mut n.szTip, "SteamPin");
+    copy_into(&mut n.szTip, "RustyDPI");
     Shell_NotifyIconW(NIM_ADD, &n);
 }
 
@@ -119,11 +119,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => open_window(),
                 WM_RBUTTONUP | WM_CONTEXTMENU => {
                     let m = CreatePopupMenu();
-                    for (id, text) in [(ID_OPEN, "Open SteamPin"), (ID_FIX, "Fix Steam now"), (ID_RESTART, "Restart Steam")] {
+                    for (id, text) in [(ID_OPEN, "Open RustyDPI"), (ID_FIX, "Fix Steam now"), (ID_RESTART, "Restart Steam")] {
                         AppendMenuW(m, MF_STRING, id, wide(text).as_ptr());
                     }
                     AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
-                    AppendMenuW(m, MF_STRING, ID_EXIT, wide("Hide tray icon (SteamPin keeps working)").as_ptr());
+                    AppendMenuW(m, MF_STRING, ID_EXIT, wide("Hide tray icon (RustyDPI keeps working)").as_ptr());
                     SetMenuDefaultItem(m, ID_OPEN as u32, 0);
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
@@ -150,7 +150,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 #[derive(Debug, PartialEq)]
 pub enum SteamAction { Nothing, Restart, AskUser, WaitForGame }
 
-/// What to do about Steam after SteamPin changed the hosts file. `handled` is the change already dealt with;
+/// What to do about Steam after RustyDPI changed the hosts file. `handled` is the change already dealt with;
 /// `waiting` is true while a restart is held back for a game. Steam restarts only when no game is running:
 /// with a game open it waits and restarts as soon as the game closes.
 pub fn steam_action(changed: Option<crate::state::Time>, started: Option<crate::state::Time>, handled: Option<crate::state::Time>,
@@ -171,20 +171,20 @@ fn watch() {
         if let Some(s) = crate::ipc::send("status", None, Duration::from_secs(4)).and_then(|r| r.status) {
             if let Some(r) = s.report.as_ref().filter(|r| r.online && !s.busy) {
                 let ok = r.rows.iter().all(|x| x.ok);
-                set_tip(if ok { "SteamPin - Steam works" } else { "SteamPin - Steam has a problem" });
-                if was_ok == Some(true) && !ok { balloon("Steam has a problem", "SteamPin couldn't fix everything. Open SteamPin to see what's wrong.", true); }
+                set_tip(if ok { "RustyDPI - everything works" } else { "RustyDPI - something isn't working" });
+                if was_ok == Some(true) && !ok { balloon("Something isn't working", "RustyDPI couldn't fix everything. Open RustyDPI to see what's wrong.", true); }
                 was_ok = Some(ok);
             }
-            // After SteamPin changed the hosts file, Steam must restart to use the new servers.
-            match steam_action(s.last_hosts_change, steam::start_time(), notified, s.settings.auto_restart_steam, steam::game_running(), waiting) {
+            // After RustyDPI changed the hosts file, Steam must restart to use the new servers.
+            if s.settings.steam_enabled { match steam_action(s.last_hosts_change, steam::start_time(), notified, s.settings.auto_restart_steam, steam::game_running(), waiting) {
                 SteamAction::Nothing => {}
                 SteamAction::Restart => { notified = s.last_hosts_change; waiting = false; restart_steam(); }
-                SteamAction::AskUser => { notified = s.last_hosts_change; balloon("Restart Steam", "SteamPin switched Steam to new servers. Restart Steam to use them.", false); }
-                SteamAction::WaitForGame => { waiting = true; balloon("Restart Steam", "SteamPin switched Steam to new servers. Steam will restart when you close your game.", false); }
-            }
+                SteamAction::AskUser => { notified = s.last_hosts_change; balloon("Restart Steam", "RustyDPI switched Steam to new servers. Restart Steam to use them.", false); }
+                SteamAction::WaitForGame => { waiting = true; balloon("Restart Steam", "RustyDPI switched Steam to new servers. Steam will restart when you close your game.", false); }
+            } }
             if steam::start_time().is_none() { waiting = false; }
         } else {
-            set_tip("SteamPin - service not running");
+            set_tip("RustyDPI - service not running");
         }
         std::thread::sleep(Duration::from_secs(30));
     }
@@ -192,14 +192,14 @@ fn watch() {
 
 pub fn run() -> i32 {
     unsafe {
-        let name = wide("Local\\SteamPin.Tray");
+        let name = wide("Local\\RustyDPI.Tray");
         let m = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
         if m.is_null() || GetLastError() == ERROR_ALREADY_EXISTS { return 0; }
         TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::SeqCst);
-        let class = wide("SteamPinTray");
+        let class = wide("RustyDPITray");
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: GetModuleHandleW(std::ptr::null()), lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
         RegisterClassW(&wc);
-        let h = CreateWindowExW(0, class.as_ptr(), wide("SteamPin tray").as_ptr(), 0, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), wc.hInstance, std::ptr::null());
+        let h = CreateWindowExW(0, class.as_ptr(), wide("RustyDPI tray").as_ptr(), 0, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), wc.hInstance, std::ptr::null());
         if h.is_null() { return 1; }
         HWND_.store(h as isize, Ordering::SeqCst);
         add_icon();

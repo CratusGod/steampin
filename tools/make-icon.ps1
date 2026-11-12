@@ -1,5 +1,5 @@
-﻿# Draws SteamPin's icon (a map pin on a dark-blue tile) and writes a multi-size .ico.
-param([string]$Out = (Join-Path $PSScriptRoot '..\src\SteamPin.App\steampin.ico'))
+﻿# Draws RustyDPI's icon (a map pin on a dark-blue tile) and writes a multi-size .ico.
+param([string]$Out = (Join-Path $PSScriptRoot '..\src\RustyDPI.App\rustydpi.ico'))
 Add-Type -AssemblyName System.Drawing
 
 function New-Frame([int]$s) {
