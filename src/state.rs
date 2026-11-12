@@ -124,9 +124,11 @@ pub struct Settings {
     pub extra_sites: Vec<String>,
     /// Hosts-file resets before this time are no longer reported (the user dismissed them).
     pub hosts_resets_seen: Option<Time>,
+    /// Look for a new version on GitHub once a day (installing always waits for the user).
+    pub check_updates: bool,
 }
 
-impl Default for Settings { fn default() -> Self { Settings { bypass_enabled: true, steam_enabled: true, auto_restart_steam: false, extra_sites: vec![], hosts_resets_seen: None } } }
+impl Default for Settings { fn default() -> Self { Settings { bypass_enabled: true, steam_enabled: true, auto_restart_steam: false, extra_sites: vec![], hosts_resets_seen: None, check_updates: true } } }
 
 impl Settings {
     pub fn load(path: &Path) -> Settings {

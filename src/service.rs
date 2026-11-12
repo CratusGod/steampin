@@ -38,6 +38,9 @@ struct Shared {
     last: Option<RunReport>,
     force_retest: bool,
     request_at: Option<std::time::Instant>,
+    update: crate::update::UpdateInfo,
+    /// Asked by the window: Some(false) = check now, Some(true) = install now.
+    update_request: Option<bool>,
 }
 
 pub struct Core {
@@ -70,6 +73,7 @@ impl Core {
         let c = self.clone(); hs.push(std::thread::spawn(move || c.run_loop()));
         let c = self.clone(); hs.push(std::thread::spawn(move || c.watchdog()));
         let c = self.clone(); hs.push(std::thread::spawn(move || c.network_watch()));
+        let c = self.clone(); hs.push(std::thread::spawn(move || c.update_watch()));
         let c = self.clone(); hs.push(std::thread::spawn(move || crate::ipc::serve(&c.stop, &|r| c.handle(r))));
         hs
     }
@@ -205,6 +209,75 @@ impl Core {
         }
     }
 
+    /// Looks for a new version 3 minutes after start, then once a day (if the user allows it).
+    fn update_watch(&self) {
+        let mut next = std::time::Instant::now() + Duration::from_secs(180);
+        while !self.stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(1));
+            let asked = self.shared.lock().unwrap().update_request.take(); // lock released before acting
+            match asked {
+                Some(true) => { self.install_update(); continue; }
+                Some(false) => { self.check_update(); next = std::time::Instant::now() + Duration::from_secs(24 * 3600); continue; }
+                None => {}
+            }
+            if std::time::Instant::now() >= next {
+                next = std::time::Instant::now() + Duration::from_secs(24 * 3600);
+                // A finished update's download, now that its installer is long gone.
+                let _ = std::fs::remove_dir_all(crate::update::update_dir(&self.paths.data_dir));
+                if Settings::load(&self.paths.settings()).check_updates { self.check_update(); }
+            }
+        }
+    }
+
+    fn check_update(&self) {
+        {
+            let mut s = self.shared.lock().unwrap();
+            if s.update.checking || s.update.installing { return; }
+            s.update.checking = true;
+        }
+        let r = crate::update::latest();
+        let mut s = self.shared.lock().unwrap();
+        let u = &mut s.update;
+        u.checking = false;
+        u.checked = Some(state::now());
+        match r {
+            Ok(rel) => {
+                u.newer = crate::update::is_newer(&rel.version, crate::engine::VERSION);
+                if u.newer && u.latest.as_deref() != Some(rel.version.as_str()) { self.log.info(&format!("update available: RustyDPI {}", rel.version)); }
+                u.latest = Some(rel.version);
+                u.notes = rel.notes;
+                u.error = None;
+            }
+            Err(e) => u.error = Some(format!("Couldn't check for updates: {e}")),
+        }
+    }
+
+    fn install_update(&self) {
+        {
+            let mut s = self.shared.lock().unwrap();
+            if s.update.installing { return; }
+            s.update.installing = true;
+            s.update.error = None;
+            s.activity = Some("Downloading the update".into());
+        }
+        let r = crate::update::latest().and_then(|rel| {
+            if !crate::update::is_newer(&rel.version, crate::engine::VERSION) { return Err("RustyDPI is already up to date".into()); }
+            self.log.info(&format!("updating to RustyDPI {}", rel.version));
+            crate::update::download_and_install(&rel, &self.paths.data_dir)
+        });
+        let mut s = self.shared.lock().unwrap();
+        match r {
+            // The installer stops this service in a moment; keep showing "installing" until then.
+            Ok(()) => s.activity = Some("Installing the update".into()),
+            Err(e) => {
+                self.log.warn(&format!("update failed: {e}"));
+                s.update.installing = false;
+                s.update.error = Some(format!("The update didn't work: {e}"));
+                s.activity = None;
+            }
+        }
+    }
+
     fn change_settings(&self, f: impl FnOnce(&mut Settings)) {
         let _g = self.settings_lock.lock().unwrap();
         let path = self.paths.settings();
@@ -227,6 +300,7 @@ impl Core {
             activity: s.activity.clone().or_else(|| (s.pending.is_some() && s.request_at.is_none()).then(|| "Starting a check".into())),
             next_run: s.next_run, last_hosts_change: s.last_hosts_change, report: s.last.clone(),
             settings: Settings::load(&self.paths.settings()),
+            update: s.update.clone(),
         }
     }
 
@@ -281,6 +355,9 @@ impl Core {
                 }
                 ok(Some(self.status()))
             }
+            ("update-check", _) => { self.shared.lock().unwrap().update_request.get_or_insert(false); ok(None) }
+            ("update-install", _) => { self.shared.lock().unwrap().update_request = Some(true); ok(None) }
+            ("check-updates", Some(on)) => { self.change_settings(|s| s.check_updates = on); ok(Some(self.status())) }
             ("hosts-seen", _) => { self.change_settings(|s| s.hosts_resets_seen = Some(state::now())); ok(Some(self.status())) }
             ("log", _) => Response { ok: true, lines: Some(crate::paths::tail(&self.paths.log(), 300)), ..Default::default() },
             ("diagnose", _) => {

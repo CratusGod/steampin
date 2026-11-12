@@ -144,9 +144,9 @@ fn read_response(s: &mut impl Read, start: Instant, total: Duration) -> std::io:
     Ok(out)
 }
 
-fn find(h: &[u8], n: &[u8]) -> Option<usize> { h.windows(n.len()).position(|w| w == n) }
+pub(crate) fn find(h: &[u8], n: &[u8]) -> Option<usize> { h.windows(n.len()).position(|w| w == n) }
 
-fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.split("\r\n").skip(1).find_map(|l| {
         let (k, v) = l.split_once(':')?;
         k.trim().eq_ignore_ascii_case(name).then(|| v.trim())

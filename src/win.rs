@@ -93,6 +93,8 @@ pub fn start_as_desktop_user(exe: &Path, args: &str) -> bool {
     unsafe {
         let mut my_session = 0u32;
         ProcessIdToSessionId(GetCurrentProcessId(), &mut my_session);
+        // Run by the service (session 0, e.g. the updater): use the signed-in user's console session.
+        if my_session == 0 { my_session = windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId(); }
         let Some(shell) = processes().into_iter().find(|p| {
             let mut s = u32::MAX;
             p.name.eq_ignore_ascii_case("explorer.exe") && ProcessIdToSessionId(p.pid, &mut s) != 0 && s == my_session
@@ -111,6 +113,8 @@ pub fn start_as_desktop_user(exe: &Path, args: &str) -> bool {
         let dir = exe.parent().map(wide);
         let mut si: STARTUPINFOW = std::mem::zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut desktop = wide(r"winsta0\default");
+        si.lpDesktop = desktop.as_mut_ptr();
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let ok = CreateProcessWithTokenW(primary, 0, std::ptr::null(), cmd.as_mut_ptr(), CREATE_NO_WINDOW, std::ptr::null(),
             dir.as_ref().map(|d| d.as_ptr()).unwrap_or(std::ptr::null()), &si, &mut pi);

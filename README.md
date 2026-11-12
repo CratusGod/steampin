@@ -67,6 +67,8 @@ It runs as a Windows service with a tray icon. Closing the window doesn't stop i
 - **Using CDPI UI, GoodbyeDPI or another zapret:** Diagnose offers to close them, because two bypass tools on the same traffic break each other.
 - **Antivirus:** some antivirus flags WinDivert (the network driver zapret uses) as a "RiskTool". If the bypass files disappear, add an exception for `C:\Program Files\RustyDPI\zapret` and click **Repair** in Diagnose.
 
+**Update:** the Update tab. RustyDPI looks for a new version once a day (you can turn that off) and installs it when you click Update now: no admin prompt, and your sites and settings are kept. Updates come only from this repository's releases and must match the published SHA256 checksum.
+
 **Uninstall:** Settings → Uninstall, or Windows Settings → Apps. It removes the service, the driver, the hosts entries and all files.
 
 ## How light is it

@@ -100,6 +100,7 @@ slint::slint! {
         default-font-size: 14px;
 
         in-out property <int> page: 0;
+        in-out property <bool> repaint-flip;
         in property <string> network;
         in property <string> head-title: "Loading...";
         in property <string> head-detail;
@@ -135,6 +136,13 @@ slint::slint! {
         in property <[SiteRow]> sites;
         in-out property <bool> show-sites;
         in property <string> site-error;
+        in property <string> update-tab: "Update";
+        in property <string> update-title: "Checking for updates...";
+        in property <string> update-detail;
+        in property <string> update-notes;
+        in property <bool> update-available;
+        in property <bool> update-busy;
+        in-out property <bool> check-updates: true;
 
         callback main-clicked;
         callback sites-clicked;
@@ -154,6 +162,9 @@ slint::slint! {
         callback add-site(string) -> bool;
         callback remove-site(string);
         callback show-sites-changed(bool);
+        callback update-check;
+        callback update-install;
+        callback set-check-updates(bool);
 
         VerticalLayout {
             padding-left: 22px; padding-right: 22px; padding-top: 16px; padding-bottom: 12px;
@@ -164,7 +175,7 @@ slint::slint! {
             }
             HorizontalLayout {
                 spacing: 4px; alignment: start;
-                for name[i] in ["Sites", "Steam", "Diagnose", "Details", "Log", "Settings"] : Rectangle {
+                for name[i] in ["Sites", "Steam", "Diagnose", "Details", "Log", "Settings", root.update-tab] : Rectangle {
                     width: nt.preferred-width + 24px; height: 32px; border-radius: 6px;
                     accessible-role: tab;
                     accessible-label: name;
@@ -361,9 +372,29 @@ slint::slint! {
                             }
                         }
                     }
+                    // Update
+                    if root.page == 6 : Card {
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px; horizontal-stretch: 1;
+                                Text { text: root.update-title; font-size: 20px; font-weight: 600; color: Theme.text; wrap: word-wrap; }
+                                Muted { text: root.update-detail; }
+                            }
+                            if root.update-available : Btn { text: "Update now"; primary: true; enabled: root.service-up && !root.update-busy; clicked => { root.update-install(); } }
+                        }
+                        HorizontalLayout { alignment: start; Btn { text: "Check for updates"; enabled: root.service-up && !root.update-busy; clicked => { root.update-check(); } } }
+                        Toggle { text: "Check for updates once a day (installing always waits for you)"; checked <=> root.check-updates; enabled: root.service-up; toggled(v) => { root.set-check-updates(v); } }
+                        if root.update-notes != "" : Heading { text: "What's new"; }
+                        if root.update-notes != "" : Text { text: root.update-notes; color: Theme.text; wrap: word-wrap; }
+                        Muted { text: "Updates come only from github.com/CratusGod/rustydpi and must match the release's published checksum before they're installed. RustyDPI installs them itself, so there's no admin prompt; this window closes and opens again on the new version. Your sites and settings are kept."; }
+                    }
                 }
             }
         }
+        // Flipped when Windows throws away the window's pixels (see `repaint_fix`): changing this
+        // invisible full-window layer makes the software renderer redraw and present everything.
+        Rectangle { x: 0; y: 0; width: root.width; height: root.height; background: root.repaint-flip ? #00000001 : #00000000; }
     }
 }
 
@@ -380,6 +411,8 @@ struct Shared {
     message: Option<String>,
     copied: bool,
     site_error: Option<String>,
+    /// When the user last clicked Check or Update now (shown as busy until the service picks it up).
+    update_asked_at: Option<std::time::Instant>,
 }
 
 type S = Arc<Mutex<Shared>>;
@@ -403,7 +436,9 @@ pub fn run() -> i32 {
     w.set_about_text(format!("RustyDPI {} · MIT licence · DPI bypass by zapret (MIT) and WinDivert (LGPL) · UI by Slint.\nData folder: {}",
         crate::engine::VERSION, crate::paths::Paths::default_paths().data_dir.display()).into());
     wire(&w, &s);
-    if let Some(p) = std::env::var("RUSTYDPI_PAGE").ok().and_then(|p| p.parse::<i32>().ok()) { w.set_page(p); w.invoke_nav(p); }
+    let args: Vec<String> = std::env::args().collect();
+    let page_arg = args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).cloned();
+    if let Some(p) = page_arg.or_else(|| std::env::var("RUSTYDPI_PAGE").ok()).and_then(|p| p.parse::<i32>().ok()) { w.set_page(p); w.invoke_nav(p); }
 
     // Poll the service every 2 s on a background thread; the UI is refreshed on its own thread.
     let (weak, s2) = (w.as_weak(), s.clone());
@@ -443,11 +478,51 @@ pub fn run() -> i32 {
                 let small = LoadImageW(inst, 1 as _, IMAGE_ICON, 16, 16, 0);
                 if !big.is_null() { SendMessageW(h, WM_SETICON, ICON_BIG as usize, big as isize); }
                 if !small.is_null() { SendMessageW(h, WM_SETICON, ICON_SMALL as usize, small as isize); }
+                repaint_fix::install(h, weak.clone());
             }
         }
     });
     let _ = w.run();
     0
+}
+
+/// Slint's software renderer only presents the parts of the window that changed. When Windows
+/// throws the window's pixels away (a fullscreen game changing the display mode, a GPU reset,
+/// waking the screen), it asks for a repaint, the renderer finds nothing changed, and the
+/// unchanged parts show garbage: often the game that was on top, so the window looks see-through.
+/// Watch for a real repaint request from Windows and force a full redraw then.
+mod repaint_fix {
+    use super::MainWindow;
+    use std::cell::RefCell;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    thread_local! { static WIN: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) }; }
+
+    pub fn install(h: HWND, w: slint::Weak<MainWindow>) {
+        WIN.with(|c| *c.borrow_mut() = Some(w));
+        unsafe { SetWindowSubclass(h, Some(proc_), 0x52445049, 0); }
+    }
+
+    fn flip() {
+        // Deferred: never touch the UI from inside winit's own message handling.
+        slint::Timer::single_shot(std::time::Duration::ZERO, || {
+            WIN.with(|c| if let Some(w) = c.borrow().as_ref().and_then(|w| w.upgrade()) { w.set_repaint_flip(!w.get_repaint_flip()); });
+        });
+    }
+
+    unsafe extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+        match msg {
+            // A non-empty update region means Windows lost pixels; winit's own redraw requests have none.
+            WM_PAINT if windows_sys::Win32::Graphics::Gdi::GetUpdateRect(h, std::ptr::null_mut(), 0) != 0 => flip(),
+            WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE | WM_THEMECHANGED => flip(),
+            WM_ACTIVATE if (wp & 0xFFFF) != 0 => flip(),
+            WM_SIZE if wp == SIZE_RESTORED as usize || wp == SIZE_MAXIMIZED as usize => flip(),
+            _ => {}
+        }
+        DefSubclassProc(h, msg, wp, lp)
+    }
 }
 
 /// Runs `f` on a worker thread, showing `label` while it works, then re-renders.
@@ -514,6 +589,9 @@ fn wire(w: &MainWindow, s: &S) {
     on!(on_sites_clicked, |w, _s| w.invoke_main_clicked());
     on!(on_retest, |w, s| { send(&w, s, "retest", None); w.set_page(0); });
     on!(on_dismiss_message, |w, s| { s.lock().unwrap().message = None; render(&w, s); });
+    on!(on_update_check, |w, s| { s.lock().unwrap().update_asked_at = Some(std::time::Instant::now()); send(&w, s, "update-check", None); });
+    on!(on_update_install, |w, s| { s.lock().unwrap().update_asked_at = Some(std::time::Instant::now()); send(&w, s, "update-install", None); });
+    on!(on_set_check_updates, |w, s, v: bool| send(&w, s, "check-updates", Some(v)));
     on!(on_show_sites_changed, |w, s, _v: bool| render(&w, s));
     {
         let (weak, s) = (ww.clone(), s.clone());
@@ -811,11 +889,13 @@ fn render(w: &MainWindow, s: &S) {
         w.set_bypass_on(st.settings.bypass_enabled);
         w.set_autorestart(st.settings.auto_restart_steam);
         w.set_steam_on(st.settings.steam_enabled);
+        w.set_check_updates(st.settings.check_updates);
         w.set_sites(model(st.settings.extra_sites.iter().map(|x| {
             let (status, ok, checked) = site_status(report.and_then(|r| r.rows.iter().find(|row| &row.name == x)));
             SiteRow { name: x.as_str().into(), label: site_label(x, show).into(), status: status.into(), ok, checked }
         }).collect()));
     }
+    render_update(w, &g);
     let b = report.map(|r| r.bypass.clone()).unwrap_or_default();
     w.set_strategy_text(match &b.strategy_name { Some(n) => format!("Current strategy: {n}"), None => "No strategy chosen yet (chosen automatically when a site needs the bypass).".into() }.into());
     w.set_scores_text(if b.scores.is_empty() { String::new() } else {
@@ -825,3 +905,32 @@ fn render(w: &MainWindow, s: &S) {
 
 /// Installed for real, or told to act as if (UI tests against `--service-test`).
 fn installed() -> bool { std::env::var("RUSTYDPI_ASSUME_INSTALLED").is_ok() || crate::installer::is_installed() }
+
+/// The Update tab, from what the service last found on GitHub.
+fn render_update(w: &MainWindow, g: &Shared) {
+    let me = crate::engine::VERSION;
+    let u = g.status.as_ref().map(|s| s.update.clone()).unwrap_or_default();
+    let asked = g.update_asked_at.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
+    let busy = u.checking || u.installing || asked;
+    let (title, detail) = if !g.service_up {
+        (format!("RustyDPI {me}"), "The RustyDPI service isn't running, so it can't update. Use Fix Steam or reinstall.".to_string())
+    } else if u.installing {
+        (format!("Updating to RustyDPI {}...", u.latest.as_deref().unwrap_or("")),
+         "Downloading and checking the new version. This window closes and opens again when it's done (under a minute).".to_string())
+    } else if u.checking || asked {
+        ("Checking for updates...".to_string(), format!("You have RustyDPI {me}."))
+    } else if u.newer {
+        (format!("RustyDPI {} is available", u.latest.as_deref().unwrap_or("")), format!("You have {me}."))
+    } else if u.latest.is_some() {
+        (format!("RustyDPI is up to date ({me})"), u.checked.map(|t| format!("Checked {}.", ago(t))).unwrap_or_default())
+    } else {
+        (format!("RustyDPI {me}"), "Not checked yet. RustyDPI looks a few minutes after it starts, then once a day.".to_string())
+    };
+    let detail = match &u.error { Some(e) if !u.installing => format!("{e}\n{detail}"), _ => detail };
+    w.set_update_title(title.into());
+    w.set_update_detail(detail.trim().to_string().into());
+    w.set_update_available(u.newer && g.service_up);
+    w.set_update_busy(busy);
+    w.set_update_notes(if u.newer { u.notes.replace("\r\n", "\n") } else { String::new() }.into());
+    w.set_update_tab(if u.newer { "Update (new)" } else { "Update" }.into());
+}

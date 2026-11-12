@@ -35,6 +35,7 @@ pub struct ServiceStatus {
     pub last_hosts_change: Option<Time>,
     pub report: Option<RunReport>,
     pub settings: Settings,
+    pub update: crate::update::UpdateInfo,
 }
 
 /// Sends one request and waits up to `timeout` for the answer. None when the service isn't there.

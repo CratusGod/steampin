@@ -1,6 +1,6 @@
 [package]
 name = "rustydpi"
-version = "4.0.0"
+version = "4.0.1"
 edition = "2021"
 description = "Keeps Steam working where it's blocked: pins Steam to working servers and runs a Steam-only DPI bypass when needed."
 license = "MIT"

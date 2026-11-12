@@ -25,6 +25,7 @@ mod relay;
 mod service;
 mod state;
 mod tray;
+mod update;
 mod ui;
 mod win;
 
